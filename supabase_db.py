@@ -111,57 +111,48 @@ def init_db():
 def save_to_supabase(reconciled_records: list):
     session = SessionLocal()
     print(
-        f"💾 Insertion/Mise à jour de {len(reconciled_records)} entités dans Supabase..."
+        f"💾 Insertion massive OPTIMISÉE (Batch) de {len(reconciled_records)} entités..."
     )
 
     try:
+        # 1. L'ASTUCE DE GÉNIE : On télécharge tous les IDs existants en UNE SEULE requête !
+        print("⏳ Vérification de l'idempotence (1 seule requête réseau)...")
+        existing_ids = {row[0] for row in session.query(Media.horragor_id).all()}
+
         inserted_count = 0
         skipped_count = 0
 
         for rec in reconciled_records:
-            # -----------------------------------------------------
-            # LOGIQUE D'IDEMPOTENCE BASÉE SUR NOTRE NOUVEL ID
-            # -----------------------------------------------------
             if not rec.get("horragor_id"):
-                print(
-                    f"⚠️ Film ignoré car il n'a pas d'horragor_id : {rec.get('title')}"
-                )
                 continue
 
-            # On interroge Supabase : as-tu déjà ce horragor_id ?
-            exists = (
-                session.query(Media).filter_by(horragor_id=rec["horragor_id"]).first()
-            )
-            if exists:
+            # La vérification se fait maintenant instantanément dans la RAM de votre PC
+            if rec["horragor_id"] in existing_ids:
                 skipped_count += 1
                 continue
 
-            # --- Suite de l'insertion (Uniquement pour les NOUVEAUX films) ---
+            # --- Création de l'objet (Uniquement pour les NOUVEAUX films) ---
             dt = None
             if rec.get("release_date"):
                 try:
                     dt = datetime.strptime(rec["release_date"], "%Y-%m-%d").date()
                 except:
-                    dt = None
+                    pass
 
-            # On insère notre horragor_id et on utilise l'ADN (source_universe) pour la catégorie
             new_media = Media(
                 horragor_id=rec["horragor_id"],
                 title=rec["title"],
                 release_date=dt,
-                category=rec.get("source_universe", "Inconnu"),  # Sci-Fi ou Horreur !
+                category=rec.get("source_universe", "Inconnu"),
                 budget=rec.get("budget", 0) if rec.get("budget") else 0,
                 revenue=rec.get("revenue", 0) if rec.get("revenue") else 0,
             )
             session.add(new_media)
-            session.flush()  # Récupère l'ID incrémental postgres (new_media.id)
+            session.flush()  # On récupère l'ID relationnel
 
             if rec.get("is_book"):
                 session.add(
-                    BookInfo(
-                        media_id=new_media.id,
-                        author=rec.get("author", "Auteur inconnu"),
-                    )
+                    BookInfo(media_id=new_media.id, author=rec.get("author", "Inconnu"))
                 )
 
             session.add(
@@ -172,15 +163,12 @@ def save_to_supabase(reconciled_records: list):
                 )
             )
 
-            # Gestion des scores unifiée (renommés lors du merge)
             if rec.get("vote_average"):
                 session.add(
                     Score(
                         media_id=new_media.id,
                         provider="TMDB",
-                        value=float(rec["vote_average"])
-                        if rec["vote_average"] is not None
-                        else 0.0,
+                        value=float(rec["vote_average"]),
                     )
                 )
             if rec.get("rt_score"):
@@ -188,17 +176,22 @@ def save_to_supabase(reconciled_records: list):
                     Score(
                         media_id=new_media.id,
                         provider="RottenTomatoes",
-                        value=float(rec["rt_score"])
-                        if rec["rt_score"] is not None
-                        else 0.0,
+                        value=float(rec["rt_score"]),
                     )
                 )
 
             inserted_count += 1
 
-        session.commit()
+            # 2. L'AUTRE ASTUCE : On valide par lots de 1000 pour soulager la RAM du serveur Supabase
+            if inserted_count % 1000 == 0:
+                session.commit()
+                print(
+                    f"   🚀 [Batch] {inserted_count} films expédiés et validés en base..."
+                )
+
+        session.commit()  # On valide le reste
         print(
-            f"✅ Opération terminée : {inserted_count} insérés, {skipped_count} ignorés (déjà existants)."
+            f"✅ Opération terminée : {inserted_count} insérés, {skipped_count} ignorés."
         )
 
     except Exception as e:
