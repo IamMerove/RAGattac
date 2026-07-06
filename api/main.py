@@ -1,79 +1,89 @@
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 
-import pandas as pd
-from fastapi import FastAPI, HTTPException
+# --- NOUVEAUX IMPORTS : Connexion à TA base Supabase ---
+# On importe la configuration DB et le modèle Media de ton pipeline horRAGore
+from app.database import SessionLocal
+from app.models.core import Media
+from fastapi import Depends, FastAPI, HTTPException
 
-# Import de nos contrats de models définit dans models.py
+# Import de nos contrats de models définis dans models.py (le code de tes amis)
 from models import ChatRequest, ChatResponse
+from sqlalchemy.orm import Session
 
-# Définition robuste des chemins
-API_DIR = Path(__file__).resolve().parent
-DATA_DIR = API_DIR.parent / "data"
-PARQUET_FILE = DATA_DIR / "horror.parquet"
+
+def get_db():
+    """
+    Dépendance FastAPI (Best Practice).
+    Ouvre une session base de données pour chaque requête utilisateur
+    et la referme proprement à la fin, pour éviter les fuites de mémoire.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Gestionnaire de cycle de vie de l'API.
-    Tout le code avant le 'yield" s'exécute au démarrage du serveur.
-    C'est ici que nous chargerons le fichier Parquet et l'index FAISS en RAM
+    C'est ici que nous testons la connexion à Supabase au démarrage du serveur.
     """
-    print("Démarrage du serveur...")
-    print(f"Recherche du fichier de données : {PARQUET_FILE}")
+    print("🚀 Démarrage du serveur FastAPI...")
+    print("🔌 Tentative de ping sur la base de données Supabase (Gold)...")
 
-    if not PARQUET_FILE.exists():
-        print("AVERTISSEMENT : Fichier Parquet introuvable. L'index FAISS sera vide.")
-        app.state.vector_index = None
-    else:
-        try:
-            # Lecture du fichier Parquet
-            df = pd.read_parquet(PARQUET_FILE)
-            print(f"Données chargées avec succès : {len(df)} films trouvés.")
-
-            # TODO: Construction du routeur FAISS (Nom -> ID)
-            # TODO: 2. Vectorisation des titres et création de l'index FAISS
-            # Pour l'instant, on stocke juste le DataFrame en mémoire brute
-        except Exception as e:
-            print(f"Erreur critique lors du chargement des données : {e}")
-            app.state.vector_index = None
+    try:
+        # Test simple pour voir si la BDD répond et compter les films
+        db = SessionLocal()
+        movie_count = db.query(Media).count()
+        print(
+            f"✅ Connexion réussie ! {movie_count} films trouvés dans la table 'medias'."
+        )
+        app.state.db_status = "Connecté à Supabase"
+        db.close()
+    except Exception as e:
+        print(f"❌ Erreur critique lors de la connexion à la BDD : {e}")
+        app.state.db_status = "Erreur de connexion"
 
     yield  # Le serveur tourne et écoute les requêtes
 
-    print("Arrêt du serveur : Libération de la mémoire RAM.")
-    app.state.movies_db = None
+    print("🛑 Arrêt du serveur FastAPI.")
 
 
 app = FastAPI(
     title="HorRAGor BOT API",
-    description="API REST asynchrone orchestrant l'agent conversationnel",
+    description="API REST asynchrone branchée sur la base Supabase 3NF",
     version="0.1.0",
     lifespan=lifespan,
 )
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
     """
-    Endpoint unque réceptionnant les questions de l'interface utilisateur.
-    Initialise le graphe LangGraph et retourne le verdict final.
+    Endpoint unique réceptionnant les questions de l'interface utilisateur.
     """
     start_time = time.time()
 
     try:
-        # Test temporaire pour vérifier que la donnée est bien en RAM
-        db_status = (
-            "Données en RAM" if hasattr(app.state, "movies_db") else "Pas de données"
-        )
+        # --- PREUVE DE CONCEPT ---
+        # On va chercher le tout premier film de TA base de données pour
+        # prouver au front-end que la connexion API <-> Supabase fonctionne.
+        sample_movie = db.query(Media).first()
+        movie_title = sample_movie.title if sample_movie else "Aucun film trouvé"
 
-        simulated_answer = f"Message reçu '{request.user_id}'. Question: '{request.question}'. Statut DB: {db_status}"
-        execution_time = int((time.time() - start_time) * 1000)
+        # On construit une fausse réponse en attendant le vrai moteur RAG
+        simulated_answer = (
+            f"Message reçu : '{request.question}'.\n"
+            f"Test DB : Je vois bien la base de données ! "
+            f"Par exemple, le premier film en base est '{movie_title}'."
+        )
 
         return ChatResponse(
             answer=simulated_answer,
-            sources=["Mock API"],
+            sources=["Supabase PostgreSQL (via SQLAlchemy)"],
             needs_ui_feedback=False,
         )
 
