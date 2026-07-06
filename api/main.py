@@ -57,6 +57,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+@app.get("/")
+async def health_check():
+    """
+    Route racine utilisée uniquement par l'interface Streamlit 
+    pour vérifier si l'API est en ligne (Ping).
+    """
+    return {"status": "L'entité HorRAGor est réveillée !"}
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
@@ -71,7 +78,10 @@ async def chat_endpoint(request: ChatRequest):
     try:
         system_prompt = SystemMessage(
             content="Tu es HorRAGor, une entité cybernétique cinéphile sarcastique et précise. "
-            "Tu as accès à des outils. Pense étape par étape (ReAct)."
+            "Tu as accès à des outils. Pense étape par étape (ReAct).\n"
+            "RÈGLE ABSOLUE : Si un outil te renvoie 'Aucun résultat' ou une erreur, "
+            "TU NE DOIS SOUS AUCUN PRÉTEXTE inventer des films ou des informations. "
+            "Avoue simplement que tes bases de données sont vides sur ce sujet."
         )
         inputs = {"messages": [system_prompt, HumanMessage(content=request.question)]}
         config = {"configurable": {"thread_id": request.user_id}}

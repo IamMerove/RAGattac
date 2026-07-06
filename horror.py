@@ -1,25 +1,26 @@
-import datetime
-import os
-
 import faiss
+import wikipedia
 import numpy as np
 import polars as pl
+import datetime
 import requests
+import os
 from bs4 import BeautifulSoup
+from typing import Annotated
 from dotenv import load_dotenv
-from langchain_community.vectorstores import PGVector
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.tools import tool
-from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import START, MessagesState, StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
 
 # --- IMPORTS POUR LA BASE DE DONNÉES RÉELLE ---
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from langchain_community.vectorstores import PGVector
+from supabase_db import Media, Score, ContentStore  # Import du MPD exact
 
-from supabase_db import ContentStore, Media, Score  # Import du MPD exact
+from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.tools import tool
+from langgraph.graph import StateGraph, START, END, MessagesState
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.memory import MemorySaver
 
 # Initialisation de la connexion SQL
 load_dotenv()
@@ -36,48 +37,84 @@ SessionLocal = sessionmaker(bind=engine)
 # =====================================================================
 class FastMovieRouter:
     """
-    Rôle (selon PDF) : Cet index contiendra uniquement les couples [Nom du film : ID].
-    Usage : Valider l'existence d'un film et récupérer son identifiant unique.
+    Rôle : Cet index contient les couples [Nom du film : ID] mis en cache sur le disque.
+    Usage : Valider l'existence d'un film et récupérer son identifiant unique instantanément.
     """
 
-    def __init__(self, parquet_path: str):
+    def __init__(self, parquet_path: str, cache_dir="cache_faiss"):
         print("🧠 Initialisation de la mémoire éphémère (Routeur FAISS)...")
         self.embeddings_model = OllamaEmbeddings(model="nomic-embed-text")
         self.dimension = 768  # Dimension stricte pour nomic-embed-text
 
-        self.index = faiss.IndexFlatL2(self.dimension)
-        self.movie_ids = []
-        self.movie_titles = []
+        self.index_path = os.path.join(cache_dir, "movies_titles.index")
+        self.mapping_path = os.path.join(cache_dir, "movies_mapping.npy")
 
-        self._load_and_index(parquet_path)
+        self.movie_titles = []
+        self.movie_ids = []
+
+        # Créer le dossier de cache s'il n'existe pas
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # STRATÉGIE DE CACHE : Si le fichier existe, on charge direct, sinon on calcule
+        if os.path.exists(self.index_path) and os.path.exists(self.mapping_path):
+            print("💾 Index FAISS détecté sur le disque. Chargement instantané...")
+            self._load_from_cache()
+        else:
+            print("⚡ Aucun cache trouvé. Calcul initial des vecteurs...")
+            self._load_and_index(parquet_path)
 
     def _load_and_index(self, parquet_path: str):
         try:
             df = pl.read_parquet(parquet_path)
             titles = df["title"].drop_nulls().to_list()
-            ids = (
-                df["horragor_id"].drop_nulls().to_list()
-            )  # On utilise le nouvel ID universel !
+            ids = df["horragor_id"].drop_nulls().to_list()
 
-            print(f"⚡ Calcul des vecteurs FAISS pour {len(titles)} titres...")
+            print(f"⚡ Calcul des vecteurs FAISS pour {len(titles)} titres (Ollama)...")
             vectors = self.embeddings_model.embed_documents(titles)
 
             vectors_np = np.array(vectors, dtype=np.float32)
+
+            # Initialisation et remplissage de l'index FAISS
+            self.index = faiss.IndexFlatL2(self.dimension)
             self.index.add(vectors_np)
 
             self.movie_titles = titles
             self.movie_ids = ids
+
+            # --- SAUVEGARDE SUR LE DISQUE ---
+            faiss.write_index(self.index, self.index_path)
+            mapping_data = {"titles": self.movie_titles, "ids": self.movie_ids}
+            np.save(self.mapping_path, mapping_data, allow_pickle=True)
+
             print(
-                f"✅ Routeur FAISS opérationnel avec {self.index.ntotal} films en RAM !"
+                f"✅ Index FAISS opérationnel et sauvegardé sur le disque ({self.index.ntotal} films) !"
             )
 
         except Exception as e:
-            print(f"⚠️ Erreur lors du chargement FAISS : {e}")
+            print(f"⚠️ Erreur lors du calcul FAISS : {e}")
+
+    def _load_from_cache(self):
+        try:
+            # 1. Rechargement de l'index binaire FAISS
+            self.index = faiss.read_index(self.index_path)
+
+            # 2. Rechargement des textes correspondants (Titres et IDs)
+            mapping_data = np.load(self.mapping_path, allow_pickle=True).item()
+            self.movie_titles = mapping_data["titles"]
+            self.movie_ids = mapping_data["ids"]
+
+            print(
+                f"🚀 {self.index.ntotal} films chargés depuis le cache en 0.05 secondes !"
+            )
+        except Exception as e:
+            print(
+                f"⚠️ Erreur lors du chargement du cache FAISS : {e}. Recalcul nécessaire."
+            )
 
     def get_movie_id(self, query_title: str) -> dict:
         """Méthode pour retrouver l'ID exact d'un film."""
-        if self.index.ntotal == 0:
-            return {"error": "Index vide"}
+        if not hasattr(self, "index") or self.index.ntotal == 0:
+            return {"error": "Index non initialisé ou vide"}
 
         query_vector = np.array(
             [self.embeddings_model.embed_query(query_title)], dtype=np.float32
@@ -85,7 +122,8 @@ class FastMovieRouter:
         distances, indices = self.index.search(query_vector, k=1)
 
         match_idx = indices[0][0]
-        if match_idx != -1 and distances[0][0] < 1.5:
+        # On passe de 1.5 à 0.6 ou 0.7 pour exiger une correspondance très forte
+        if match_idx != -1 and distances[0][0] < 0.6: 
             return {
                 "title": self.movie_titles[match_idx],
                 "id": self.movie_ids[match_idx],
@@ -186,7 +224,6 @@ def find_similar_horror_movies(movie_id: str) -> str:
     finally:
         session.close()
 
-
 @tool
 def scrape_detailed_synopsis(movie_title: str) -> str:
     """
@@ -194,18 +231,28 @@ def scrape_detailed_synopsis(movie_title: str) -> str:
     Utilise cet outil SEULEMENT si l'utilisateur demande des anecdotes très précises, profondes ou un résumé complet.
     Fournis le titre COMPLET du film en argument texte.
     """
-    print(f"   [WEB] Scraping Wikipédia activé pour : {movie_title}...")
+    print(f"   [WEB] API Wikipédia activée pour : {movie_title}...")
     try:
-        url = f"https://fr.wikipedia.org/wiki/{movie_title.replace(' ', '_')}"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
-            paragraphs = soup.find_all("p")
-            summary = " ".join([p.text for p in paragraphs[0:2] if len(p.text) > 20])
-            return summary[:800] + "... [FIN DU SCRAPING]"
-        return "Impossible d'accéder à la page Wikipédia."
+        # On force la langue française
+        wikipedia.set_lang("fr")
+        
+        # 1. On effectue une vraie recherche pour trouver le titre exact de la page
+        resultats_recherche = wikipedia.search(movie_title)
+        
+        if not resultats_recherche:
+             return f"Aucune page Wikipédia trouvée pour le film '{movie_title}'."
+             
+        titre_officiel = resultats_recherche[0]
+        
+        # 2. On extrait le résumé proprement
+        summary = wikipedia.summary(titre_officiel, sentences=4)
+        return summary + "... [FIN DU SCRAPING]"
+        
+    except wikipedia.exceptions.DisambiguationError as e:
+        # Gère le cas où plusieurs films ont le même nom
+        return f"Le titre est trop ambigu. Wikipédia propose plusieurs pages : {e.options[:3]}"
     except Exception as e:
-        return f"Erreur réseau : {e}"
+        return f"Erreur réseau ou page introuvable : {e}"
 
 
 @tool
