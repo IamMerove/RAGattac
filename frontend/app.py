@@ -72,9 +72,12 @@ with st.sidebar:
 
     # Indicateur dynamique visuel dans la sidebar
     try:
-        # On tente une requête très rapide juste pour voir si le port écoute
-        res = requests.get("http://localhost:8000/", timeout=0.5)
-        st.success("🟢 API FastAPI En Ligne")
+        # On interroge /docs pour valider que l'instance FastAPI tourne bien
+        res = requests.get("http://localhost:8000/docs", timeout=0.5)
+        if res.status_code == 200:
+            st.success("🟢 API FastAPI En Ligne")
+        else:
+            st.warning("🟡 API Répond (Statut anormal)")
     except:
         st.error("🔴 API FastAPI Hors-ligne")
 
@@ -138,9 +141,7 @@ if st.session_state.processing and st.session_state.messages:
             # Calcule un pourcentage progressif basé sur l'étape actuelle
             current_percentage = int((i + 1) * (80 / len(LOADING_STEPS)))
             progress_bar.progress(current_percentage)
-            time.sleep(
-                0.5
-            )  # Petit délai pour laisser le temps de lire le lore d'horreur
+            time.sleep(0.5)  # Petit délai pour laisser le temps de lire le lore d'horreur
 
         progress_text.markdown(
             "⚡ *Établissement du contact avec le serveur d'outils...*"
@@ -148,8 +149,14 @@ if st.session_state.processing and st.session_state.messages:
 
         # Étape B : Appel réel vers l'API FastAPI de ton binôme
         try:
+            # Construction du payload attendu par le modèle ChatRequest du backend
+            payload = {
+                "question": last_user_message,
+                "user_id": "default_user"
+            }
+            
             response = requests.post(
-                BACKEND_URL, json={"question": last_user_message}, timeout=45
+                BACKEND_URL, json=payload, timeout=45
             )
 
             # Si le serveur a répondu, on pousse la jauge à 100% juste avant d'afficher
@@ -157,8 +164,9 @@ if st.session_state.processing and st.session_state.messages:
             time.sleep(0.2)
 
             if response.status_code == 200:
+                # Récupération de la clé "answer" spécifiée par le ChatResponse du backend
                 answer = response.json().get(
-                    "response", "L'entité refuse de répondre..."
+                    "answer", "L'entité refuse de répondre..."
                 )
             else:
                 answer = f"⚠️ **Malédiction du Serveur** : Erreur HTTP {response.status_code}. Les entrailles de l'API saignent."
