@@ -148,20 +148,20 @@ if st.session_state.processing and st.session_state.messages:
 
         # Étape B : Appel réel vers l'API FastAPI de ton binôme
         try:
-            response = requests.post(
-                BACKEND_URL, json={"question": last_user_message}, timeout=45
-            )
+            # CORRECTION 1 : On ajoute un "user_id" fixe (ou généré) pour respecter le modèle Pydantic
+            payload = {"user_id": "stream_user_1", "question": last_user_message}
+
+            response = requests.post(BACKEND_URL, json=payload, timeout=45)
 
             # Si le serveur a répondu, on pousse la jauge à 100% juste avant d'afficher
             progress_bar.progress(100)
             time.sleep(0.2)
 
             if response.status_code == 200:
-                answer = response.json().get(
-                    "response", "L'entité refuse de répondre..."
-                )
+                # CORRECTION 2 : On cherche la clé "answer" et non "response"
+                answer = response.json().get("answer", "L'entité refuse de répondre...")
             else:
-                answer = f"⚠️ **Malédiction du Serveur** : Erreur HTTP {response.status_code}. Les entrailles de l'API saignent."
+                answer = f"⚠️ **Malédiction du Serveur** : Erreur HTTP {response.status_code}. Détail : {response.text}"
 
         except requests.exceptions.ConnectionError:
             progress_bar.progress(100)

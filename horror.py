@@ -1,25 +1,25 @@
+import datetime
+import os
+
 import faiss
 import numpy as np
 import polars as pl
-import datetime
 import requests
-import os
 from bs4 import BeautifulSoup
-from typing import Annotated
 from dotenv import load_dotenv
+from langchain_community.vectorstores import PGVector
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
+from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
 # --- IMPORTS POUR LA BASE DE DONNÉES RÉELLE ---
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from langchain_community.vectorstores import PGVector
-from supabase_db import Media, Score, ContentStore  # Import du MPD exact
 
-from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_core.tools import tool
-from langgraph.graph import StateGraph, START, END, MessagesState
-from langgraph.prebuilt import ToolNode, tools_condition
-from langgraph.checkpoint.memory import MemorySaver
+from supabase_db import ContentStore, Media, Score  # Import du MPD exact
 
 # Initialisation de la connexion SQL
 load_dotenv()

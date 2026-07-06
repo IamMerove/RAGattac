@@ -1,89 +1,88 @@
 import time
 from contextlib import asynccontextmanager
 
-# --- NOUVEAUX IMPORTS : Connexion à TA base Supabase ---
-# On importe la configuration DB et le modèle Media de ton pipeline horRAGore
-from app.database import SessionLocal
-from app.models.core import Media
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 
-# Import de nos contrats de models définis dans models.py (le code de tes amis)
-from models import ChatRequest, ChatResponse
-from sqlalchemy.orm import Session
+# Import LangChain pour structurer les messages
+from langchain_core.messages import HumanMessage, SystemMessage
 
+# Import de nos contrats de models
+from api.models import ChatRequest, ChatResponse
 
-def get_db():
-    """
-    Dépendance FastAPI (Best Practice).
-    Ouvre une session base de données pour chaque requête utilisateur
-    et la referme proprement à la fin, pour éviter les fuites de mémoire.
-    """
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# Import optionnel juste pour tester la BDD au démarrage (Ton code !)
+# Import du cerveau RAG (qui est à la racine du projet)
+from horror import SessionLocal, create_horragor_agent
+
+# On importe le modèle Media depuis le fichier de BDD de tes amis
+from supabase_db import Media
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Gestionnaire de cycle de vie de l'API.
-    C'est ici que nous testons la connexion à Supabase au démarrage du serveur.
     """
     print("🚀 Démarrage du serveur FastAPI...")
-    print("🔌 Tentative de ping sur la base de données Supabase (Gold)...")
 
+    # 1. Test de la Base de données Supabase
+    print("🔌 Tentative de ping sur la base de données Supabase (Gold)...")
     try:
-        # Test simple pour voir si la BDD répond et compter les films
         db = SessionLocal()
         movie_count = db.query(Media).count()
-        print(
-            f"✅ Connexion réussie ! {movie_count} films trouvés dans la table 'medias'."
-        )
-        app.state.db_status = "Connecté à Supabase"
+        print(f"✅ Connexion DB réussie ! {movie_count} films trouvés dans 'medias'.")
         db.close()
     except Exception as e:
         print(f"❌ Erreur critique lors de la connexion à la BDD : {e}")
-        app.state.db_status = "Erreur de connexion"
 
-    yield  # Le serveur tourne et écoute les requêtes
+    # 2. Chargement de l'Agent LangGraph et du routeur FAISS
+    print("🧠 Chargement de l'Agent LangGraph et du routeur FAISS en RAM...")
+    try:
+        # Le fichier parquet est à la racine, comme horror.py
+        chemin_parquet = "horragor_final_data.parquet"
+        app.state.agent = create_horragor_agent(chemin_parquet)
+        print("✅ Agent LangGraph opérationnel !")
+    except Exception as e:
+        print(f"❌ Erreur critique au chargement de l'agent : {e}")
+        app.state.agent = None
+
+    yield
 
     print("🛑 Arrêt du serveur FastAPI.")
 
 
 app = FastAPI(
     title="HorRAGor BOT API",
-    description="API REST asynchrone branchée sur la base Supabase 3NF",
+    description="API REST asynchrone branchée sur l'agent LangGraph et Supabase",
     version="0.1.0",
     lifespan=lifespan,
 )
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
+async def chat_endpoint(request: ChatRequest):
     """
     Endpoint unique réceptionnant les questions de l'interface utilisateur.
     """
     start_time = time.time()
 
-    try:
-        # --- PREUVE DE CONCEPT ---
-        # On va chercher le tout premier film de TA base de données pour
-        # prouver au front-end que la connexion API <-> Supabase fonctionne.
-        sample_movie = db.query(Media).first()
-        movie_title = sample_movie.title if sample_movie else "Aucun film trouvé"
+    if not hasattr(app.state, "agent") or app.state.agent is None:
+        raise HTTPException(status_code=500, detail="L'agent RAG n'est pas initialisé.")
 
-        # On construit une fausse réponse en attendant le vrai moteur RAG
-        simulated_answer = (
-            f"Message reçu : '{request.question}'.\n"
-            f"Test DB : Je vois bien la base de données ! "
-            f"Par exemple, le premier film en base est '{movie_title}'."
+    try:
+        system_prompt = SystemMessage(
+            content="Tu es HorRAGor, une entité cybernétique cinéphile sarcastique et précise. "
+            "Tu as accès à des outils. Pense étape par étape (ReAct)."
         )
+        inputs = {"messages": [system_prompt, HumanMessage(content=request.question)]}
+        config = {"configurable": {"thread_id": request.user_id}}
+
+        # ON LANCE LE GRAPH ! (L'agent réfléchit, utilise FAISS puis Supabase)
+        result = app.state.agent.invoke(inputs, config)
+        reponse_finale = result["messages"][-1].content
 
         return ChatResponse(
-            answer=simulated_answer,
-            sources=["Supabase PostgreSQL (via SQLAlchemy)"],
+            answer=reponse_finale,
+            sources=["LangGraph Agent", "FAISS Router", "Supabase PostgreSQL"],
             needs_ui_feedback=False,
         )
 
