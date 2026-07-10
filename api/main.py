@@ -57,13 +57,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
 @app.get("/")
 async def health_check():
     """
-    Route racine utilisée uniquement par l'interface Streamlit 
+    Route racine utilisée uniquement par l'interface Streamlit
     pour vérifier si l'API est en ligne (Ping).
     """
     return {"status": "L'entité HorRAGor est réveillée !"}
+
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
